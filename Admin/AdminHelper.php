@@ -112,42 +112,69 @@ class AdminHelper
 
         // get the field element
         $childFormBuilder = $this->getChildFormBuilder($formBuilder, $elementId);
+        
+        //Child form not found (probably nested one)
+        //if childFormBuilder was not found resulted in fatal error getName() method call on non object
+        if (!$childFormBuilder) {
 
-        // retrieve the FieldDescription
-        $fieldDescription = $admin->getFormFieldDescription($childFormBuilder->getName());
+            $propertyAccessor = new PropertyAccessor();
+            $entity = $admin->getSubject();
 
-        try {
-            $value = $fieldDescription->getValue($form->getData());
-        } catch (NoValueException $e) {
-            $value = null;
+            $path = $this->getElementAccessPath($elementId, $entity, $propertyAccessor);
+
+            $collection = $propertyAccessor->getValue($entity, $path);
+
+            if ($collection instanceof ArrayCollection) {
+                $entityClassName = $this->entityClassNameFinder($admin, explode('.', preg_replace('#\[\d*?\]#', '', $path)));
+            } elseif ($collection instanceof \Doctrine\ORM\PersistentCollection) {
+                //since doctrine 2.4
+                $entityClassName = $collection->getTypeClass()->getName();
+            } else {
+                throw new \Exception('unknown collection class');
+            }
+
+            $collection->add(new $entityClassName);
+            $propertyAccessor->setValue($entity, $path, $collection);
+
+            $fieldDescription = null;
         }
-
-        // retrieve the posted data
-        $data = $admin->getRequest()->get($formBuilder->getName());
-
-        if (!isset($data[$childFormBuilder->getName()])) {
-            $data[$childFormBuilder->getName()] = array();
-        }
-
-        $objectCount = count($value);
-        $postCount   = count($data[$childFormBuilder->getName()]);
-
-        $fields = array_keys($fieldDescription->getAssociationAdmin()->getFormFieldDescriptions());
-
-        // for now, not sure how to do that
-        $value = array();
-        foreach ($fields as $name) {
-            $value[$name] = '';
-        }
-
-        // add new elements to the subject
-        while ($objectCount < $postCount) {
-            // append a new instance into the object
+        else {
+            // retrieve the FieldDescription
+            $fieldDescription = $admin->getFormFieldDescription($childFormBuilder->getName());
+    
+            try {
+                $value = $fieldDescription->getValue($form->getData());
+            } catch (NoValueException $e) {
+                $value = null;
+            }
+    
+            // retrieve the posted data
+            $data = $admin->getRequest()->get($formBuilder->getName());
+    
+            if (!isset($data[$childFormBuilder->getName()])) {
+                $data[$childFormBuilder->getName()] = array();
+            }
+    
+            $objectCount = count($value);
+            $postCount   = count($data[$childFormBuilder->getName()]);
+    
+            $fields = array_keys($fieldDescription->getAssociationAdmin()->getFormFieldDescriptions());
+    
+            // for now, not sure how to do that
+            $value = array();
+            foreach ($fields as $name) {
+                $value[$name] = '';
+            }
+    
+            // add new elements to the subject
+            while ($objectCount < $postCount) {
+                // append a new instance into the object
+                $this->addNewInstance($form->getData(), $fieldDescription);
+                ++$objectCount;
+            }
+    
             $this->addNewInstance($form->getData(), $fieldDescription);
-            ++$objectCount;
         }
-
-        $this->addNewInstance($form->getData(), $fieldDescription);
 
         $finalForm = $admin->getFormBuilder()->getForm();
         $finalForm->setData($subject);
@@ -200,5 +227,68 @@ class AdminHelper
     public function camelize($property)
     {
         return BaseFieldDescription::camelize($property);
+    }
+    
+    /**
+     * @param AdminInterface $admin
+     * @param $elements
+     * @return string
+     */
+    protected function entityClassNameFinder(AdminInterface $admin, $elements)
+    {
+        $element = array_shift($elements);
+        $associationAdmin = $admin->getFormFieldDescription($element)->getAssociationAdmin();
+        if (count($elements) == 0) {
+            return $associationAdmin->getClass();
+        } else {
+            return $this->entityClassNameFinder($associationAdmin, $elements);
+        }
+    }
+
+    /**
+     * get access path to element which works with PropertyAccessor
+     *
+     * @param string $elementId
+     * @param mixed $entity
+     * @param PropertyAccessor $propertyAccessor
+     * @return string
+     * @throws \Exception
+     */
+    private function getElementAccessPath($elementId, $entity, PropertyAccessor $propertyAccessor)
+    {
+        $initial = preg_replace('#(_(\d+)_)#', '[$2]', implode('_', explode('_', substr($elementId, strpos($elementId, '_') + 1))));
+        $parts = preg_split('#\[\d+\]#', $initial);
+
+        $part_return_value = $return_value = '';
+        $current_entity = $entity;
+
+        foreach ($parts as $key => $value){
+            $sub_parts = explode('_', $value);
+            $id = '';
+            $dot = '';
+
+            foreach ($sub_parts as $sub_value) {
+                $id .= ($id) ? '_'.$sub_value : $sub_value;
+
+                if ($propertyAccessor->isReadable($current_entity, $part_return_value.$dot.$id)) {
+                    $part_return_value .= $id;
+                    $dot = '.';
+                    $id = '';
+                } else $dot = '';
+            }
+
+            if ($dot !== '.') throw new \Exception(sprintf('Could not get element id from %s Failing part: %s', $elementId, $sub_value));
+
+            preg_match("#$value\[(\d+)#", $initial, $matches);
+
+            if (isset($matches[1])) $part_return_value .= '['.$matches[1].']';
+
+            $return_value .= $return_value ? '.'.$part_return_value : $part_return_value;
+            $part_return_value = '';
+
+            if (isset($parts[$key+1])) $current_entity = $propertyAccessor->getValue($entity, $return_value);
+        }
+
+        return $return_value;
     }
 }
